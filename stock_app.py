@@ -1,6 +1,7 @@
 """
-주식 대시보드 - API 키 없이도 시세조회 가능
-=============================================
+주식 대시보드 - 개인정보 없는 버전
+=====================================
+각자 본인 종목/매수가/보유주수를 직접 입력
 streamlit run stock_app.py
 """
 
@@ -43,30 +44,6 @@ KOSPI200 = {
     "024110": "기업은행",        "000880": "한화",
 }
 
-MY_STOCKS = {
-    "005930": "삼성전자",
-    "010120": "LS ELECTRIC",
-    "166090": "하나머티리얼즈",
-    "036540": "SFA반도체",
-    "219130": "컨텍",
-}
-
-MY_BUY_PRICE = {
-    "005930": 186000,
-    "010120": 239500,
-    "166090": 71850,
-    "036540": 9467,
-    "219130": 22680,
-}
-
-MY_SHARES = {
-    "005930": 11,
-    "010120": 5,
-    "166090": 18,
-    "036540": 45,
-    "219130": 25,
-}
-
 SHORT_PERIOD = 5
 LONG_PERIOD  = 20
 VOLUME_SURGE = 2.0
@@ -90,21 +67,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 @st.cache_data(ttl=300)
 def get_yahoo_prices(ticker_code, days=30):
     try:
-        ticker = ticker_code + ".KS"
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=60d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker_code}.KS?interval=1d&range=60d"
         res = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
-        data = res.json()
-        result = data["chart"]["result"][0]
-        timestamps = result["timestamp"]
-        closes  = result["indicators"]["quote"][0]["close"]
-        volumes = result["indicators"]["quote"][0]["volume"]
+        result = res.json()["chart"]["result"][0]
         df = pd.DataFrame({
-            "date":   [datetime.fromtimestamp(t).strftime("%Y%m%d") for t in timestamps],
-            "close":  [int(c) if c else None for c in closes],
-            "volume": [int(v) if v else 0 for v in volumes],
+            "date":   [datetime.fromtimestamp(t).strftime("%Y%m%d") for t in result["timestamp"]],
+            "close":  [int(c) if c else None for c in result["indicators"]["quote"][0]["close"]],
+            "volume": [int(v) if v else 0   for v in result["indicators"]["quote"][0]["volume"]],
         }).dropna().tail(days)
         return df
     except Exception:
@@ -112,8 +85,7 @@ def get_yahoo_prices(ticker_code, days=30):
 
 def get_yahoo_current_price(ticker_code):
     try:
-        ticker = ticker_code + ".KS"
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker_code}.KS?interval=1d&range=2d"
         res = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
         meta = res.json()["chart"]["result"][0]["meta"]
         return int(meta.get("regularMarketPrice", 0))
@@ -138,174 +110,155 @@ def check_volume_surge(df):
         return False
     return df["volume"].iloc[-1] >= df["volume"].iloc[:-1].mean() * VOLUME_SURGE
 
-def get_base_url(is_mock):
-    return ("https://openapivts.koreainvestment.com:29443" if is_mock
-            else "https://openapi.koreainvestment.com:9443")
-
-def get_access_token(app_key, app_secret, is_mock):
-    url = f"{get_base_url(is_mock)}/oauth2/tokenP"
-    res = requests.post(url, json={
-        "grant_type": "client_credentials",
-        "appkey": app_key, "appsecret": app_secret,
-    }, timeout=10)
-    res.raise_for_status()
-    return res.json().get("access_token")
-
-def get_headers(app_key, app_secret, token, tr_id):
-    return {
-        "Content-Type": "application/json",
-        "authorization": f"Bearer {token}",
-        "appkey": app_key, "appsecret": app_secret,
-        "tr_id": tr_id, "custtype": "P",
-    }
-
-def get_balance(app_key, app_secret, token, is_mock, account_no):
-    url = f"{get_base_url(is_mock)}/uapi/domestic-stock/v1/trading/inquire-balance"
-    tr_id = "VTTC8434R" if is_mock else "TTTC8434R"
-    headers = get_headers(app_key, app_secret, token, tr_id)
-    acc = account_no.split("-")
-    params = {
-        "CANO": acc[0], "ACNT_PRDT_CD": acc[1],
-        "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02",
-        "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N",
-        "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01",
-        "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
-    }
-    res = requests.get(url, headers=headers, params=params, timeout=10)
-    res.raise_for_status()
-    result = res.json()
-    return {
-        "cash": int(result["output2"][0]["dnca_tot_amt"]),
-        "stocks": result["output1"],
-    }
-
-def get_holding_qty(balance, ticker):
-    for s in balance["stocks"]:
-        if s["pdno"] == ticker:
-            return int(s["hldg_qty"])
-    return 0
-
 def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     return now.replace(hour=9, minute=0, second=0) <= now <= now.replace(hour=15, minute=30, second=0)
 
-with st.sidebar:
-    st.markdown("## ⚙️ 설정")
-    st.markdown("#### 📊 시세 조회")
-    st.success("✅ API 키 없이 사용 가능!")
-    st.markdown("---")
-    st.markdown("#### 🤖 자동매매 (선택)")
-    st.caption("자동매매 기능은 KIS API 키 필요")
-    app_key    = st.text_input("APP KEY",    value=os.getenv("APP_KEY", ""),    type="password")
-    app_secret = st.text_input("APP SECRET", value=os.getenv("APP_SECRET", ""), type="password")
-    account_no = st.text_input("계좌번호",   value=os.getenv("ACCOUNT_NO", ""), placeholder="50123456-01")
-    is_mock    = st.toggle("모의투자 모드", value=True)
-    mode_label = "🟡 모의투자" if is_mock else "🔴 실전투자"
-    st.info(mode_label)
-
-api_ready = bool(app_key and app_secret and account_no)
-
-if api_ready:
-    if "token" not in st.session_state or st.session_state.get("is_mock") != is_mock:
-        try:
-            st.session_state.token   = get_access_token(app_key, app_secret, is_mock)
-            st.session_state.is_mock = is_mock
-        except Exception as e:
-            st.sidebar.error(f"KIS 연결 실패: {e}")
-            api_ready = False
 
 st.markdown("# 📈 주식 대시보드")
 market_status = "🟢 장 중" if is_market_open() else "🔴 장 마감"
-kis_status    = "✅ KIS 연결됨" if api_ready else "⚪ KIS 미연결 (시세조회만 가능)"
-st.markdown(f"**시장:** {market_status} &nbsp;|&nbsp; **{kis_status}**")
+st.markdown(f"**시장:** {market_status} &nbsp;|&nbsp; 📡 Yahoo Finance (15분 지연)")
 st.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["💼 내 포트폴리오", "📡 종목 스캐너", "🤖 자동매매 현황"])
+tab1, tab2 = st.tabs(["💼 내 포트폴리오", "📡 종목 스캐너"])
 
 with tab1:
-    col_t, col_r = st.columns([5, 1])
-    with col_t:
-        st.markdown("### 💼 내 보유 종목")
-    with col_r:
-        if st.button("🔄 새로고침", key="r1"):
-            st.cache_data.clear()
+    st.markdown("### 💼 내 보유 종목")
+    st.info("📌 본인 종목을 직접 입력하세요. 입력한 정보는 이 브라우저에서만 보이고 서버에 저장되지 않아요.")
 
-    with st.spinner("Yahoo Finance에서 시세 조회 중..."):
-        total_invested = 0
-        total_current  = 0
-        rows = []
-        for ticker, name in MY_STOCKS.items():
-            try:
-                df      = get_yahoo_prices(ticker)
-                current = get_yahoo_current_price(ticker)
-                if current == 0 and not df.empty:
-                    current = int(df["close"].iloc[-1])
-                signal    = check_cross_signal(df) if not df.empty else "HOLD"
-                vol_surge = check_volume_surge(df)  if not df.empty else False
-                ma5       = round(df["close"].rolling(SHORT_PERIOD).mean().iloc[-1]) if not df.empty else 0
-                ma20      = round(df["close"].rolling(LONG_PERIOD).mean().iloc[-1])  if not df.empty else 0
-                buy_price = MY_BUY_PRICE.get(ticker, current)
-                shares    = MY_SHARES.get(ticker, 0)
-                pnl_pct   = (current - buy_price) / buy_price * 100 if buy_price else 0
-                pnl_amt   = (current - buy_price) * shares
-                total_invested += buy_price * shares
-                total_current  += current * shares
-                rows.append({
-                    "종목명": name, "현재가": current, "매수가": buy_price,
-                    "보유주수": shares, "MA5": ma5, "MA20": ma20,
-                    "수익률": pnl_pct, "손익": pnl_amt,
-                    "signal": signal, "vol_surge": vol_surge,
-                })
-            except Exception:
-                rows.append({
-                    "종목명": name, "현재가": 0, "매수가": MY_BUY_PRICE.get(ticker, 0),
-                    "보유주수": MY_SHARES.get(ticker, 0), "MA5": 0, "MA20": 0,
-                    "수익률": 0, "손익": 0, "signal": "오류", "vol_surge": False,
-                })
+    if "my_stocks" not in st.session_state:
+        st.session_state.my_stocks = []
 
-    total_pnl     = total_current - total_invested
-    total_pnl_pct = total_pnl / total_invested * 100 if total_invested else 0
-    pnl_sign      = "+" if total_pnl >= 0 else ""
-    c1, c2, c3 = st.columns(3)
-    c1.metric("💰 총 투자금액", f"{total_invested:,}원")
-    c2.metric("📊 평가금액",   f"{total_current:,}원")
-    c3.metric("📈 총 손익",    f"{pnl_sign}{total_pnl:,.0f}원", f"{pnl_sign}{total_pnl_pct:.2f}%")
+    with st.expander("➕ 종목 추가하기", expanded=len(st.session_state.my_stocks) == 0):
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
+        with c1:
+            input_ticker = st.text_input("종목코드", placeholder="예: 005930", key="input_ticker")
+        with c2:
+            input_buy = st.number_input("매수가 (원)", min_value=0, value=0, key="input_buy")
+        with c3:
+            input_shares = st.number_input("보유수량 (주)", min_value=0, value=0, key="input_shares")
+        with c4:
+            st.markdown("<br>", unsafe_allow_html=True)
+            add_btn = st.button("추가", key="add_stock")
+
+        if add_btn:
+            if input_ticker.strip() == "":
+                st.error("종목코드를 입력해주세요")
+            elif input_buy <= 0:
+                st.error("매수가를 입력해주세요")
+            elif input_shares <= 0:
+                st.error("보유수량을 입력해주세요")
+            else:
+                ticker = input_ticker.strip().zfill(6)
+                name = KOSPI200.get(ticker, ticker)
+                existing = [s for s in st.session_state.my_stocks if s["ticker"] == ticker]
+                if existing:
+                    st.warning(f"{name} 은 이미 추가되어 있어요!")
+                else:
+                    st.session_state.my_stocks.append({
+                        "ticker": ticker, "name": name,
+                        "buy_price": input_buy, "shares": input_shares,
+                    })
+                    st.success(f"✅ {name} 추가됐어요!")
+                    st.rerun()
+
+    if st.session_state.my_stocks:
+        cols = st.columns(len(st.session_state.my_stocks))
+        for i, stock in enumerate(st.session_state.my_stocks):
+            with cols[i]:
+                if st.button(f"❌ {stock['name']} 삭제", key=f"del_{i}"):
+                    st.session_state.my_stocks.pop(i)
+                    st.rerun()
+
     st.markdown("---")
 
-    for row in rows:
-        signal    = row["signal"]
-        vol_surge = row["vol_surge"]
-        pnl_pct   = row["수익률"]
-        pnl_amt   = row["손익"]
-        sign      = "+" if pnl_pct >= 0 else ""
-        color     = "pos" if pnl_pct >= 0 else "neg"
-        if signal == "BUY":
-            sig_label = "🟢 매수신호" + (" 📊거래량급증!" if vol_surge else "")
-            sig_color = "buy"
-        elif signal == "SELL":
-            sig_label = "🔴 매도신호"
-            sig_color = "sell"
-        else:
-            sig_label = "⚪ 관망"
-            sig_color = "hold"
-        c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 2, 3])
-        c1.markdown(f"**{row['종목명']}**  \n<small style='color:#64748b'>{row['보유주수']}주 · 매수가 {row['매수가']:,}원</small>", unsafe_allow_html=True)
-        c2.markdown(f"**{row['현재가']:,}원**")
-        c3.markdown(f"<span class='{color}'>{sign}{pnl_pct:.2f}%</span>", unsafe_allow_html=True)
-        c4.markdown(f"<span class='{color}'>{sign}{pnl_amt:,.0f}원</span>", unsafe_allow_html=True)
-        c5.markdown(f"MA5: {row['MA5']:,}")
-        c6.markdown(f"<span class='{sig_color}'>{sig_label}</span>", unsafe_allow_html=True)
+    if not st.session_state.my_stocks:
+        st.markdown("<div style='text-align:center;padding:40px;color:#64748b'>위에서 종목을 추가해주세요 👆</div>", unsafe_allow_html=True)
+    else:
+        col_t, col_r = st.columns([5, 1])
+        with col_r:
+            if st.button("🔄 새로고침", key="r1"):
+                st.cache_data.clear()
+
+        with st.spinner("시세 조회 중..."):
+            total_invested = 0
+            total_current  = 0
+            rows = []
+
+            for stock in st.session_state.my_stocks:
+                try:
+                    df      = get_yahoo_prices(stock["ticker"])
+                    current = get_yahoo_current_price(stock["ticker"])
+                    if current == 0 and not df.empty:
+                        current = int(df["close"].iloc[-1])
+                    signal    = check_cross_signal(df) if not df.empty else "HOLD"
+                    vol_surge = check_volume_surge(df)  if not df.empty else False
+                    ma5       = round(df["close"].rolling(SHORT_PERIOD).mean().iloc[-1]) if not df.empty else 0
+                    ma20      = round(df["close"].rolling(LONG_PERIOD).mean().iloc[-1])  if not df.empty else 0
+                    pnl_pct   = (current - stock["buy_price"]) / stock["buy_price"] * 100 if stock["buy_price"] else 0
+                    pnl_amt   = (current - stock["buy_price"]) * stock["shares"]
+                    total_invested += stock["buy_price"] * stock["shares"]
+                    total_current  += current * stock["shares"]
+                    rows.append({
+                        "종목명": stock["name"], "현재가": current,
+                        "매수가": stock["buy_price"], "보유주수": stock["shares"],
+                        "MA5": ma5, "MA20": ma20,
+                        "수익률": pnl_pct, "손익": pnl_amt,
+                        "signal": signal, "vol_surge": vol_surge,
+                    })
+                except Exception:
+                    rows.append({
+                        "종목명": stock["name"], "현재가": 0,
+                        "매수가": stock["buy_price"], "보유주수": stock["shares"],
+                        "MA5": 0, "MA20": 0, "수익률": 0, "손익": 0,
+                        "signal": "오류", "vol_surge": False,
+                    })
+
+        total_pnl     = total_current - total_invested
+        total_pnl_pct = total_pnl / total_invested * 100 if total_invested else 0
+        pnl_sign      = "+" if total_pnl >= 0 else ""
+        c1, c2, c3 = st.columns(3)
+        c1.metric("💰 총 투자금액", f"{total_invested:,}원")
+        c2.metric("📊 평가금액",   f"{total_current:,}원")
+        c3.metric("📈 총 손익",    f"{pnl_sign}{total_pnl:,.0f}원", f"{pnl_sign}{total_pnl_pct:.2f}%")
         st.markdown("---")
-    st.caption("📡 Yahoo Finance 시세 (15분 지연) · API 키 없이 사용 가능")
+
+        for row in rows:
+            signal    = row["signal"]
+            vol_surge = row["vol_surge"]
+            pnl_pct   = row["수익률"]
+            pnl_amt   = row["손익"]
+            sign      = "+" if pnl_pct >= 0 else ""
+            color     = "pos" if pnl_pct >= 0 else "neg"
+            if signal == "BUY":
+                sig_label = "🟢 매수신호" + (" 📊거래량급증!" if vol_surge else "")
+                sig_color = "buy"
+            elif signal == "SELL":
+                sig_label = "🔴 매도신호"
+                sig_color = "sell"
+            else:
+                sig_label = "⚪ 관망"
+                sig_color = "hold"
+            c1, c2, c3, c4, c5, c6 = st.columns([3, 2, 2, 2, 2, 3])
+            c1.markdown(f"**{row['종목명']}**  \n<small style='color:#64748b'>{row['보유주수']}주 · 매수가 {row['매수가']:,}원</small>", unsafe_allow_html=True)
+            c2.markdown(f"**{row['현재가']:,}원**")
+            c3.markdown(f"<span class='{color}'>{sign}{pnl_pct:.2f}%</span>", unsafe_allow_html=True)
+            c4.markdown(f"<span class='{color}'>{sign}{pnl_amt:,.0f}원</span>", unsafe_allow_html=True)
+            c5.markdown(f"MA5: {row['MA5']:,}")
+            c6.markdown(f"<span class='{sig_color}'>{sig_label}</span>", unsafe_allow_html=True)
+            st.markdown("---")
+
+        st.caption("📡 Yahoo Finance (15분 지연) · 입력 정보는 서버에 저장되지 않아요")
 
 with tab2:
     st.markdown("### 📡 코스피200 골든크로스 스캐너")
     st.markdown("골든크로스 + 거래량 급증 종목 자동 탐색 · API 키 불필요")
+
     if st.button("🔍 스캔 시작", key="scan"):
         buy_signals, sell_signals = [], []
-        prog = st.progress(0, text="스캔 준비 중...")
+        prog  = st.progress(0, text="스캔 준비 중...")
         total = len(KOSPI200)
         for i, (ticker, name) in enumerate(KOSPI200.items()):
             prog.progress((i + 1) / total, text=f"스캔 중... ({i+1}/{total}) {name}")
@@ -319,9 +272,12 @@ with tab2:
                 ma5       = round(df["close"].rolling(SHORT_PERIOD).mean().iloc[-1])
                 ma20      = round(df["close"].rolling(LONG_PERIOD).mean().iloc[-1])
                 if signal == "BUY":
-                    buy_signals.append({"강도": "🔥 강력매수" if vol_surge else "🟢 매수",
-                        "종목명": name, "현재가": current, "MA5": ma5, "MA20": ma20,
-                        "거래량급증": "🔥 YES" if vol_surge else "—"})
+                    buy_signals.append({
+                        "강도": "🔥 강력매수" if vol_surge else "🟢 매수",
+                        "종목명": name, "현재가": current,
+                        "MA5": ma5, "MA20": ma20,
+                        "거래량급증": "🔥 YES" if vol_surge else "—",
+                    })
                 elif signal == "SELL":
                     sell_signals.append({"종목명": name, "현재가": current, "MA5": ma5, "MA20": ma20})
                 time.sleep(0.2)
@@ -356,54 +312,3 @@ with tab2:
         else:
             st.info("현재 매도 신호 종목이 없어요")
         st.caption("⚠️ 스캔 결과는 참고용입니다. 투자 결정은 본인이 판단하세요.")
-
-with tab3:
-    st.markdown("### 🤖 자동매매 현황")
-    if not api_ready:
-        st.warning("⚠️ 자동매매 현황은 왼쪽 사이드바에서 KIS API 키를 입력해야 사용 가능해요.")
-        st.info("💡 시세조회와 스캐너는 API 키 없이도 사용 가능해요!")
-    else:
-        if st.button("🔄 새로고침", key="r3"):
-            if "auto_data" in st.session_state:
-                del st.session_state.auto_data
-        if "auto_data" not in st.session_state:
-            with st.spinner("신호 확인 중..."):
-                auto_rows = []
-                try:
-                    token   = st.session_state.token
-                    balance = get_balance(app_key, app_secret, token, is_mock, account_no)
-                    st.metric("💰 예수금", f"{balance['cash']:,}원")
-                    for ticker, name in MY_STOCKS.items():
-                        try:
-                            df      = get_yahoo_prices(ticker)
-                            current = get_yahoo_current_price(ticker)
-                            signal  = check_cross_signal(df) if not df.empty else "HOLD"
-                            vol     = check_volume_surge(df)  if not df.empty else False
-                            holding = get_holding_qty(balance, ticker)
-                            ma5     = round(df["close"].rolling(SHORT_PERIOD).mean().iloc[-1]) if not df.empty else 0
-                            ma20    = round(df["close"].rolling(LONG_PERIOD).mean().iloc[-1])  if not df.empty else 0
-                            if signal == "BUY" and holding == 0:
-                                action = "🟢 매수 예정"
-                            elif signal == "SELL" and holding > 0:
-                                action = "🔴 매도 예정"
-                            elif signal == "BUY" and holding > 0:
-                                action = "✅ 보유 중 (매수신호)"
-                            else:
-                                action = "⚪ 대기 중"
-                            auto_rows.append({"종목명": name, "현재가": f"{current:,}원",
-                                "MA5": f"{ma5:,}", "MA20": f"{ma20:,}",
-                                "보유주수": holding, "자동매매 액션": action,
-                                "거래량급증": "🔥" if vol else "—"})
-                        except Exception:
-                            continue
-                    st.session_state.auto_data = auto_rows
-                except Exception as e:
-                    st.error(f"조회 실패: {e}")
-        if "auto_data" in st.session_state:
-            df_auto = pd.DataFrame(st.session_state.auto_data)
-            if not df_auto.empty:
-                st.dataframe(df_auto, use_container_width=True, hide_index=True)
-    st.markdown("---")
-    st.markdown("#### ▶ cmd에서 자동매매 실행하는 법")
-    st.code("python auto_trading.py", language="bash")
-    st.caption("자동매매는 골든크로스 감지 시 자동으로 매수/매도 주문을 실행해요.")
